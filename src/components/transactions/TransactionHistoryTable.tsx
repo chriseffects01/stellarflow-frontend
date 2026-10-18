@@ -4,11 +4,11 @@ import { useMemo, useState } from "react";
 import Icon from "@/components/icons/Icon";
 import { ICON_IDS } from "@/components/icons/iconIds";
 import { useToast } from "@/components/ui/ToastQueue";
-import { exportTransactionsToCsv, type TaxPlatform } from "@/utils/csvExport";
 import { useTransactionHistoryWithFallback } from "@/app/hooks/useTransactionHistory";
 import type { TransactionRecord, TransactionType } from "@/types/transactions";
 import { TransactionHistoryTableSkeleton } from "@/components/skeletons/TransactionHistoryTableSkeleton";
-import { SocialShareModal, type SocialShareData } from "@/components/common";
+import { type SocialShareData, SocialShareModal } from "@/components/common";
+import TransactionExportModal from "./TransactionExportModal";
 
 const TYPE_FILTERS: { label: string; value: "all" | TransactionType }[] = [
   { label: "All Activity", value: "all" },
@@ -46,10 +46,8 @@ function toCsvRow(tx: TransactionRecord): string {
   // Select the relevant amount and asset.
   // For swaps and liquidity, receivedAmount represents what the user receives.
   // For remittances, we use the sent amount (or received if it's incoming).
-  const amount =
-    tx.receivedAmount > 0 ? tx.receivedAmount : tx.sentAmount;
-  const asset =
-    tx.receivedAmount > 0 ? tx.receivedCurrency : tx.sentCurrency;
+  const amount = tx.receivedAmount > 0 ? tx.receivedAmount : tx.sentAmount;
+  const asset = tx.receivedAmount > 0 ? tx.receivedCurrency : tx.sentCurrency;
 
   return [
     csvEscape(formatDate(tx.date)),
@@ -61,30 +59,12 @@ function toCsvRow(tx: TransactionRecord): string {
   ].join(",");
 }
 
-function generateCsv(transactions: TransactionRecord[]): string {
-  const header = ["Date", "Tx Hash", "Type", "Amount", "Asset", "Status"];
-  const rows = transactions.map(toCsvRow);
-  return [header.join(","), ...rows].join("\n");
-}
-
-function downloadCsv(csv: string, filename: string) {
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
-}
-
 export default function TransactionHistoryTable() {
   const { data: transactions, isLoading } = useTransactionHistoryWithFallback();
   const { addToast, updateToast } = useToast();
   const [typeFilter, setTypeFilter] = useState<"all" | TransactionType>("all");
-  const [isExporting, setIsExporting] = useState(false);
   const [shareData, setShareData] = useState<SocialShareData | null>(null);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
   const filteredTransactions = useMemo(
     () =>
@@ -94,36 +74,6 @@ export default function TransactionHistoryTable() {
     [transactions, typeFilter],
   );
 
-  const handleExport = async () => {
-    if (isExporting || filteredTransactions.length === 0) return;
-
-    setIsExporting(true);
-    const toastId = addToast({
-      title: "Preparing CSV export",
-      description: `Formatting ${filteredTransactions.length} transactions…`,
-      status: "processing",
-    });
-
-    try {
-      const csv = generateCsv(filteredTransactions);
-      const filename = `transactions-${new Date().toISOString().slice(0, 10)}.csv`;
-      downloadCsv(csv, filename);
-      updateToast(toastId, {
-        title: "Export ready",
-        description: `${filteredTransactions.length} transactions downloaded as CSV.`,
-        status: "confirmed",
-      });
-    } catch {
-      updateToast(toastId, {
-        title: "Export failed",
-        description: "Could not generate the CSV file. Please try again.",
-        status: "failed",
-      });
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
   if (isLoading) {
     return <TransactionHistoryTableSkeleton />;
   }
@@ -132,7 +82,9 @@ export default function TransactionHistoryTable() {
     <div className="overflow-hidden rounded-xl border border-gray-800 bg-[#161b22] text-gray-100">
       <div className="flex flex-col gap-4 border-b border-gray-800 p-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-gray-100">Transaction History</h2>
+          <h2 className="text-lg font-semibold text-gray-100">
+            Transaction History
+          </h2>
           <p className="text-sm text-gray-500">
             Swaps, liquidity provision, and remittance settlements.
           </p>
@@ -155,12 +107,12 @@ export default function TransactionHistoryTable() {
 
           <button
             type="button"
-            onClick={handleExport}
-            disabled={isExporting || filteredTransactions.length === 0}
+            onClick={() => setIsExportModalOpen(true)}
+            disabled={transactions.length === 0}
             className="flex items-center gap-2 rounded-lg border border-gray-700 bg-[#161b22] px-4 py-2 text-sm text-gray-300 transition-colors hover:border-gray-600 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Icon id={ICON_IDS.download} size={16} />
-            {isExporting ? "Exporting…" : "Export CSV"}
+            Export{" "}
           </button>
         </div>
       </div>
@@ -203,23 +155,27 @@ export default function TransactionHistoryTable() {
                 className="inline-flex items-center gap-1 text-blue-400 hover:underline"
               >
                 {truncateHash(tx.txHash)}
-                <span className={`ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-sans font-medium uppercase ${STATUS_STYLES[tx.status]}`}>
+                <span
+                  className={`ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] font-sans font-medium uppercase ${STATUS_STYLES[tx.status]}`}
+                >
                   {tx.status}
                 </span>
               </a>
               {tx.type === "swap" && tx.status === "completed" && (
                 <button
                   type="button"
-                  onClick={() => setShareData({
-                    type: "trade",
-                    title: `${tx.sentCurrency} to ${tx.receivedCurrency} swap completed`,
-                    fromSymbol: tx.sentCurrency,
-                    fromAmount: tx.sentAmount.toLocaleString(),
-                    toSymbol: tx.receivedCurrency,
-                    toAmount: tx.receivedAmount.toLocaleString(),
-                    timestamp: `${new Date(tx.date).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC`,
-                    txHash: tx.txHash,
-                  })}
+                  onClick={() =>
+                    setShareData({
+                      type: "trade",
+                      title: `${tx.sentCurrency} to ${tx.receivedCurrency} swap completed`,
+                      fromSymbol: tx.sentCurrency,
+                      fromAmount: tx.sentAmount.toLocaleString(),
+                      toSymbol: tx.receivedCurrency,
+                      toAmount: tx.receivedAmount.toLocaleString(),
+                      timestamp: `${new Date(tx.date).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" })} UTC`,
+                      txHash: tx.txHash,
+                    })
+                  }
                   className="mt-1 inline-flex items-center rounded px-2 py-1 font-sans text-xs text-cyan-300 transition-colors hover:bg-cyan-950/60 hover:text-cyan-200"
                   aria-label={`Share completed ${tx.sentCurrency} to ${tx.receivedCurrency} swap`}
                 >
@@ -237,6 +193,12 @@ export default function TransactionHistoryTable() {
           shareData={shareData}
         />
       )}
+
+      <TransactionExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        transactions={transactions}
+      />
     </div>
   );
 }
